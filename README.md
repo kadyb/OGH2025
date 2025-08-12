@@ -16,4 +16,4 @@ This repository contains materials for the [OpenGeoHub Summer School 2025: "Data
 
 # Contact
 
-If you have any questions or need help, please let me know at [Mattermost](https://mattermost.opengeohub.org/)
+If you have any questions or need help, please let me know at [Mattermost](https://mattermost.opengeohub.org/).
