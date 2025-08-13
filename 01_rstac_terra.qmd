@@ -1,0 +1,415 @@
+---
+title: "Automatic acquisition and processing of satellite data in R"
+author: "Krzysztof Dyba"
+format:
+  html:
+    toc: true
+    toc-title: " "
+    embed-resources: true
+---
+
+# Introduction
+
+Nowadays, knowledge of three basic technologies is necessary to process huge
+sets of satellite data:
+
+- **SpatioTemporal Asset Catalogs** (STAC) -- a standardized way of organizing
+and describing spatial datasets (including satellite imagery), facilitating
+their search and access. It uses the JSON format to represent spatial data,
+but doesn't store it. It only informs what data is available and what it covers
+(<https://stacspec.org>).
+- **Cloud Optimized Geotiff** (COG) -- a special GeoTiff-based file format
+designed to be optimized for efficient access in cloud computing environments.
+The most important feature is that it allows streaming and access to only those
+parts of the image that are needed without having to download the entire huge
+file. In addition, COG also includes several pre-computed lower-resolution
+versions of the image, called overviews or pyramids. When displaying a large
+area at low zoom, these previews can be quickly downloaded instead of processing
+the full-resolution data (<https://www.cogeo.org>).
+- **Virtual File Systems** (VFS) -- abstraction layers that enable [GDAL](https://gdal.org)
+to seamlessly read and write geospatial data from various sources such as remote
+locations, compressed archives, or cloud storage systems. For instance,
+`/vsicurl/` is a major protocol for cloud-native geospatial workflows,
+which allows reading files directly from URLs using HTTP range requests.
+For a detailed description, see [here](https://gdal.org/en/stable/user/virtual_file_systems.html).
+
+In practice, the STAC catalog can describe Sentinel 2 data stored as COG files
+on Amazon Web Service. The user can search this catalog using the **rstac**
+package for images from a specific area and time range. Then, the **terra**
+package, which utilizes GDAL, can be used to read these files without fully
+downloading them (only the required part) and perform the appropriate analysis.
+
+# Data search
+
+```{r}
+# install.packages("rstac")
+library("rstac")
+```
+
+The [rstac](https://brazil-data-cube.github.io/rstac/) package is used to handle
+STAC catalogs in R, allowing to search for spatial data in accordance with this
+standard. Let's start by loading this package (it must be installed beforehand).
+The next step is to connect to a data source made available by the data provider.
+A list of sources can be found on [STAC Index](https://stacindex.org).
+In our example, we will use the popular [Earth Search](https://element84.com/earth-search/)
+service, which provides free satellite images from Sentinel and doesn't require
+registration. To connect to this service, we need to use the `stac()` function.
+
+```{r}
+stac_source = stac("https://earth-search.aws.element84.com/v1")
+stac_source
+```
+
+As a result, we receive the `rstac_query` object containing information about
+the HTTP request that will be sent to the server. There are two methods for
+sending requests:
+
+- GET (`get_request()`) – mainly used to retrieve data from the server. The data
+is sent via the URL as query parameters.
+- POST (`post_request()`) – mainly used to send data to the server. The data
+is sent in the body of the HTTP request.
+
+The appropriate method depends on the server. Let's now try to query the server
+about what datasets (collections) are stored on it.
+
+::: {.callout-note appearance="simple"}
+It will be very helpful to use the pipe operator (`|>`) to combine several
+operations into one coherent sequence. We can use the keyboard shortcut
+`CTRL` + `SHIFT` + `M`, but this requires first select the
+`Use native pipe operator` option (`Code` > `Editing` tab) in RStudio.
+:::
+
+```{r}
+collections = stac_source |>
+  collections() |>
+  get_request()
+collections
+```
+
+In response, we received an object that is a multi-level list of lists.
+You can check its structure yourself using the `View()` function. Exploring
+such objects is more complicated compared to one-dimensional objects (vectors).
+For instance, if we want to see the available datasets, we should use the
+`lapply()` function, which iterates over each element of the input data (in this
+case, a list) applying the specified function. The result is a list, which can
+then be simplified to a vector using the `unlist()` function. Additionally,
+we can use a lambda function (also known as an anonymous function). This allows
+us to replace the `function()` keyword with the `\()` character.
+
+```{r}
+collection_names = unlist(lapply(collections$collections, \(x) x$id))
+collection_names
+```
+
+::: {.callout-note appearance="simple"}
+Sentinel 2 data is available in two collections, that is, `sentinel-2-l2a`
+(older) and `sentinel-2-c1-l2a` (newer). Currently, products are being updated
+to the newer `sentinel-2-c1-l2a` collection, which should be preferred.
+:::
+
+Now let's search for available products within the `sentinel-2-c1-l2a` collection.
+The `stac_search()` function is used to search for data and allows us to define
+parameters such as:
+
+- `collections`,
+- spatial extent in WGS 84 (`bbox`),
+- time interval in [RFC 3339 standard](https://www.rfc-editor.org/rfc/rfc3339) (`datetime`),
+- maximum number of products (`limit`).
+
+In this case, we must send the request using the POST method.
+
+```{r}
+stac_source |>
+  stac_search(
+    collections = "sentinel-2-c1-l2a",
+    bbox = c(22.5, 51.1, 22.6, 51.2), # xmin, ymin, xmax, ymax (WGS84)
+    datetime = "2023-01-01T00:00:00Z/2023-12-31T00:00:00Z", # RFC 3339
+    limit = 5) |>
+  post_request() -> scenes
+scenes
+```
+
+288 products were found that match the query conditions. As a result, we
+obtained various layers (`assets`) and attributes (`fields`) that we can
+inspect. Let's see some sample product properties.
+
+```{r}
+# first 15 properties
+names(scenes$features[[1]]$properties)[1:15]
+```
+
+In total, we have access to 44 features that describe the product, including
+acquisition date, satellite platform name, scene cloud cover percentage,
+coordinate system, scene ID, etc. 
+
+Fortunately, we can simplify the process of inspecting and selecting the data
+we are interested in. Instead of looking through these complex lists, we can
+use the `items_as_sf()` function, which will return the results in a spatial
+data frame, making things much easier.
+
+```{r}
+df = items_as_sf(scenes)
+# View(df)
+```
+
+::: {.callout-note appearance="simple"}
+The resulting data frame is a spatial object (`sf data frame`), so scene
+geometries can be displayed using the `plot()` function.
+:::
+
+One of the critical attributes in this data frame is cloud cover (`eo:cloud_cover`).
+Let's check these values.
+
+```{r}
+df$`eo:cloud_cover`
+```
+
+As we can see, these are quite high values, which limits the usefulness of
+these scenes for analysis. We can modify our previous query by adding a filter
+rule to return only scenes below a specific cloud cover value. The `ext_query()`
+function is designed for this purpose.
+
+```{r}
+stac_source |>
+  stac_search(
+    collections = "sentinel-2-c1-l2a",
+    bbox = c(22.5, 51.1, 22.6, 51.2),
+    datetime = "2023-01-01T00:00:00Z/2023-12-31T00:00:00Z",
+    limit = 5) |>
+  ext_query(`eo:cloud_cover` < 10) |>
+  post_request() -> scenes
+```
+
+```{r}
+df = items_as_sf(scenes)
+df$`eo:cloud_cover`
+```
+Satellite scenes usually contain low-resolution thumbnails in RGB composition.
+In the case of Sentinel 2 data, they are saved as `thumbnail.jpg`. For a quick
+preview, we must first select the appropriate layer using the `assets_select()`
+function, and then return the link using the `assets_url()` function. To load
+the `.jpg` file, an additional package is required, e.g., **imager**, which
+has the `load.image()` function.
+
+```{r}
+#| message: false
+
+# install.packages("imager")
+library("imager")
+par(mar = c(0, 0, 0, 0)) # remove margins
+
+scenes |>
+  items_select(1) |>
+  assets_select(asset_names = "thumbnail") |>
+  assets_url() |>
+  load.image() |>
+  plot(axes = FALSE)
+```
+
+# Data acquisition
+
+After we selected the appropriate scenes, we can proceed to download them.
+Basically, there are two ways to do this:
+
+1. Downloading entire files to disk:
+    - `assets_download()` function from the **rstac** package,
+    - `download.file()` function built into **R**.
+2. Downloading a specific spatial range:
+    - `/vsicurl/` protocol available in programs utilizing GDAL, e.g., **terra**
+      or [gdalwarp](https://gdal.org/programs/gdalwarp.html).
+
+Let's start with the first method. Once again, we will select three specific
+layers from the scene (`blue`, `green` and `red` spectral bands) and return
+links to these files. They will then be passed to the `download.file()` function.
+
+```{r}
+scenes |>
+  items_select(1) |>
+  assets_select(asset_names = c("blue", "green", "red", "nir")) |>
+  assets_url() |>
+  sort() -> urls
+urls
+```
+
+::: {.callout-note appearance="simple"}
+Please note that bands don't necessarily have to be sorted in the expected
+order. It's a good idea to sort them to avoid confusing the order.
+:::
+
+Let's create a new directory called `sentinel` using the `dir.create()` function,
+where the files will be saved. To create the save paths, we need to specify the
+file name along with the extension. To do this, we can use the `basename()`
+function to extract these names from the links. Then, combine the directory
+path with the file path using the `file.path()` function.
+
+```{r}
+#| eval: false
+
+dir.create("sentinel")
+files = file.path("sentinel", basename(urls))
+```
+
+Finally, we will use a loop that will download all files. It is necessary to
+specify the links from which the data will be downloaded and the save paths.
+It is worth increasing the download timeout before doing so.
+
+```{r}
+#| eval: false
+options(timeout = 600) # increase timeout
+
+for (i in seq_along(urls)) {
+  download.file(urls[i], files[i], mode = "wb")
+}
+```
+
+The second option, based on the `/vsicurl/` protocol, is simple. All we need
+to do is add the prefix `/vsicurl/` to the raster links using the `paste0()`
+function, and then load the data as a raster object.
+
+```{r}
+urls = paste0("/vsicurl/", urls)
+```
+
+# Data processing
+
+[terra](https://rspatial.github.io/terra/) is a crucial package for processing
+spatial data — both raster and vector.
+
+```{r}
+#| message: false
+
+# install.packages("terra")
+library("terra")
+```
+
+In the previous section, we defined vector `urls` with links (including the
+`/vsicurl/` prefix) to three spectral bands. Let's now load them using the
+`rast()` function.
+
+```{r}
+r = rast(urls)
+r
+```
+
+::: {.callout-note appearance="simple"}
+For clarity, we can change band names by referring to the `names` attribute
+as follows:
+
+```r
+names(r) = c("blue", "green", "red", "nir")
+```
+:::
+
+The basic metadata for this scene has been returned. The complete Sentinel
+scene consists of 10,000 columns and 10,000 rows. If we are interested in a
+smaller area, we can specify the appropriate spatial extent using the `win`
+argument and the `SpatExtent` class object. Of course, the coordinates must
+be specified in the same coordinate system as the raster (in this case, it
+is `EPSG:32634`).
+
+```{r}
+w = ext(c(570000, 600000, 5560000, 5620000)) # xmin, xmax, ymin, ymax
+r = rast(urls, win = w)
+r
+```
+
+We can display the RGB composition using the `plotRGB()` function
+and setting the bands in the correct order. It is also necessary to
+stretch the colors using the `stretch` argument.
+
+```{r}
+plotRGB(r, 3, 2, 1, stretch = "lin")
+```
+
+Using the `summary()` function, we can calculate basic statistics for the raster
+based on a defined sample.
+
+```{r}
+#| warning: false
+
+summary(r, size = 10000)
+```
+
+Satellite data is usually stored as integers to reduce its size on disk.
+Based on the table above, we can see that the spectral band values have been
+scaled from integer to floating point, i.e., to a reflection range from 0 to 1.
+Data scaling is performed automatically in the `rast()` function if the file
+contains scaling and offset factors. These can be inspected using the `scoff()`
+function. If the factors are not defined, we must perform the transformations
+ourselves according to the proper formulas.
+
+However, this dataset has outliers below 0. The simplest method to remove them
+is the `clamp()` function. We define the minimum and maximum threshold values,
+and values outside this range will be removed or overwritten (default) depending
+on the `values` argument.
+
+```{r}
+#| warning: false
+
+r = clamp(r, lower = 0, upper = 1, values = TRUE)
+summary(r, size = 10000)
+```
+
+Using the red (`BO4`) and near-infrared (`B08`) bands, we can calculate the
+normalized difference vegetation index (NDVI) with the following formula:
+
+$$
+\text{NDVI} = \frac{\text{NIR} - \text{Red}}{\text{NIR} + \text{Red}}
+$$
+
+Let's define the above formula as a function.
+
+```{r}
+ndvi = function(red, nir) {
+  (nir - red) / (nir + red)
+}
+```
+
+Now we can apply it in the `lapp()` function, which is used to perform
+calculations on selected layers from the raster. We need to select bands
+3 (red) and 4 (ndvi).
+
+```{r}
+ndvi_raster = lapp(r[[c(3, 4)]], fun = ndvi)
+```
+
+After calculating the index, we can display it on the map using the `plot()`
+function. To create a unique color palette (e.g., red-yellow-green), we can
+use the `colorRampPalette()` function.
+
+```{r}
+colors = colorRampPalette(c("red", "yellow", "darkgreen"))(100)
+plot(ndvi_raster, col = colors, main = "NDVI")
+```
+
+The results can be saved to disk using the `writeRaster()` function and then
+opened in another program, such as QGIS. We must specify the path on the
+disk where the file will be saved and its extension, e.g., `.tif`.
+
+```{r}
+#| eval: false
+
+writeRaster(ndvi_raster, "ndvi.tif")
+```
+
+# Summary
+
+In this short tutorial, we learned what technologies are used to acquire and
+process satellite data, and we completed a practical workflow in the R
+programming language using two packages: **rstac** and **terra**.
+Obviously, this is just an introduction and doesn't exhaust the subject.
+Further topics are primarily related to the processing of time series for the
+entire globe using data from various sensors and machine learning and deep
+learning methods.
+
+# Task
+
+1. Find a satellite scene from any area and time. However, keep in mind that
+cloud cover should be low.
+2. Load two spectral bands: B08 (NIR) and B11 (SWIR 1) using the `/vsicurl/`
+protocol and the **terra** package. Please note that these images are in different
+spatial resolutions, so you need to resample one using the `resample()` function.
+3. Randomly sample images using the `SpatSample()` and `set.seed()` functions.
+4. Create a scatter plot and calculate Pearson's correlation coefficient.
+You can set the appropriate transparency for the points and include the
+$x = y$ line.
