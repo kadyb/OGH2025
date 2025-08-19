@@ -7,9 +7,10 @@ This repository contains materials for the [OpenGeoHub Summer School 2025: "Data
 These workshops introduce the basic concepts and practical techniques for working with remote
 sensing data in the R programming language. During the course, we will discuss how to access,
 process, and analyze satellite data using a comprehensive ecosystem of spatial packages.
-We will also discuss automation and workflow reproducibility, which are very useful in practice.
-Workshops aim to provide the essential knowledge and practical skills needed to start your own
-projects involving the acquisition and processing of remote sensing data.
+We will also cover automation and workflow reproducibility, which are very useful in real-world
+applications. Workshops aim to provide the essential knowledge and practical skills needed to start
+your own projects involving the acquisition and processing of remote sensing data.
+Feel free to ask questions and get involved!
 
 # Requirements
 
