@@ -9,7 +9,7 @@ sensing data in the R programming language. During the course, we will discuss h
 process, and analyze satellite data using a comprehensive ecosystem of spatial packages.
 We will also discuss automation and workflow reproducibility, which are very useful in practice.
 Workshops aim to provide the essential knowledge and practical skills needed to start your own
-projects involving remote sensing data acquisition and processing.
+projects involving the acquisition and processing of remote sensing data.
 
 # Requirements
 
