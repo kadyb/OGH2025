@@ -1,0 +1,417 @@
+---
+title: "Land use and land cover classification with satellite image time series in R"
+author: "Krzysztof Dyba"
+format:
+  html:
+    toc: true
+    toc-title: " "
+    embed-resources: true
+---
+
+# Introduction
+
+The **sits** is an end-to-end toolkit for analyzing satellite image time
+series (SITS) data, primarily focused on land use and land cover (LULC)
+classification using machine learning and deep learning models.
+It is built on top of two core packages **terra** and **rstac** (and other
+spatial packages) and it is designed to handle large-scale data cubes,
+including those stored in the cloud environments.
+
+::: {.callout-note appearance="simple"}
+**Data cube** is a collection of satellite images covering a specific area
+over a period, organized into spatial (x, y) and temporal (time) dimensions,
+with spectral bands.
+:::
+
+A typical workflow looks like this:
+
+```{mermaid}
+flowchart LR
+    A[Select image collection<br/>from cloud provider] --> B[Create a regular data cube]
+    
+    B --> C[Extract time series<br/>from labelled samples]
+    
+    C --> D[Train a machine<br/>learning model]
+    
+    D --> E[Classify a data cube and<br/>obtain class probabilities]
+
+    E --> F[Produce classified map]
+```
+
+We will start by installing the **sits** package using the `install.packages()`
+function. Then, we can load it using the `library()` function.
+
+```{r}
+#| message: false
+
+# install.packages("sits")
+library("sits")
+```
+
+The **sits** package uses the **torch** package to train neural network models,
+which requires installing two mandatory libraries, i.e. `LibTorch` and
+`LibLantern`. We can do this by calling `torch::install_torch()`. If you
+have a slow Internet connection, it is worth increasing the timeout.
+
+```{r}
+#| eval: false
+#| message: false
+
+options(timeout = 600)
+torch::install_torch()
+```
+
+# Data acquisition
+
+The first step is to create a data cube. This can be done based on data
+available in network services (e.g., Amazon Web Service, Microsoft Planetary
+Computer, Copernicus Data Space Ecosystem) or local data. We will choose
+the former. To do this, we will use the `sits_cube()` function, in which we
+can specify the following arguments: `source`, `collection`, `tiles`, `bands`,
+`start_date`, and `end_date`. 
+
+::: {.callout-note appearance="simple"}
+To check the available collections, use the `sits_list_collections()` function.
+:::
+
+```{r}
+cube = sits_cube(
+  source = "MPC",
+  collection = "SENTINEL-2-L2A",
+  tiles = "33UXU",
+  bands = c("B02", "B03", "B04", "B08"),
+  start_date = "2023-01-01",
+  end_date = "2023-12-31",
+  progress = FALSE
+)
+```
+
+The result is a `tibble` (*à la* data frame) object containing metadata about
+the data cube and the satellite images themselves. Note that these are just
+links to images stored on the server. Naturally, we can display information
+about these objects.
+
+```{r}
+# data cube
+t(cube)
+```
+
+```{r}
+# images
+head(cube$file_info[[1]])
+```
+
+In the next step, let's select the appropriate images based on cloud cover
+(`cloud_cover` attribute).
+
+```{r}
+# select images with less than 10% cloud cover
+idx = cube$file_info[[1]]$cloud_cover < 10
+cube$file_info[[1]] = cube$file_info[[1]][idx, ]
+```
+
+After selection, let's check what imaging dates are available (`date` attribute).
+
+```{r}
+unique(cube$file_info[[1]]$date)
+```
+
+Using the `plot()` function and defining the relevant spectral bands and date,
+we can display the specified scene. For interactive visualization, the
+`sits_view()` function can be used.
+
+```{r}
+#| message: false
+
+plot(cube, red = "B04", green = "B03", blue = "B02", dates = "2023-05-30")
+```
+
+# Time series analysis
+
+```{r}
+#| message: false
+
+library("sf")
+```
+
+Let's load sample points with specific land cover classes (`points.gpkg` file).
+The file is located in the `data` folder. To load, use the `sf` package and
+the `read_sf()` function.
+
+```{r}
+points = read_sf("data/points.gpkg")
+points$category = as.factor(points$category)
+```
+
+Let's look at basic information such as the number of points and the coordinate
+reference system (CRS).
+
+```{r}
+nrow(points)
+st_crs(points)$epsg
+```
+
+The reference system for points and rasters is identical (`EPSG:32633`), so
+we don't need to reproject the data. Let's also check the category distribution
+using the `table()` function.
+
+```{r}
+table(points$category)
+```
+
+We can see that the data is unbalanced (two categories dominate, while the
+other three are underrepresented). In practice, this may cause the model to
+be unable to learn to recognize these few categories due to the small training
+sample.
+
+Let's select two sample objects, for instance cropland and water, and analyze how
+their values changed over time. The key function in this case is `sits_get_data()`
+which retrieves spectral values from the data cube and creates time series for
+specified points. In the function, we must provide the name of the column
+(`label_attr` argument) in which the categories are stored.
+
+```{r}
+# extract time series for points
+idx = c(2, 18) # cropland and water objects
+ts_data = sits_get_data(cube, points[idx, ], label_attr = "category")
+```
+
+Instead of plotting four spectral curves, let's calculate the NDVI based on
+the near-infrared (B08) and red (B04) bands. The `sits_apply()` function is
+designed to create new layers, in this case the vegetation index.
+
+```{r}
+ts_data = sits_apply(ts_data, NDVI = (B08 - B04) / (B08 + B04))
+```
+
+Now let's plot a figure showing how the NDVI changed from April to October
+in 2023 for cropland and water. Time series data are stored in the `time_series`
+column separately for each point.
+
+```{r}
+plot(ts_data$time_series[[1]]$Index, ts_data$time_series[[1]]$NDVI,
+     xlab = "Date", ylab = "Value", main = "NDVI", type = "l",
+     ylim = c(-0.1, 1), col = "orange")
+lines(ts_data$time_series[[2]]$Index, ts_data$time_series[[2]]$NDVI,
+     xlab = "Date", col = "blue")
+legend("topright", legend = c("Cropland", "Water"), col = c("orange", "blue"),
+       lty = 1)
+```
+
+# Classification
+
+## Data preparation
+
+Having points with labelled land cover classes and their corresponding spectral
+values, we can train a classification model. Developing a model requires training
+data and test data (i.e., independent data that was not used for training) to
+verify its correctness.
+
+So let's prepare the data. We will split our input dataset (`points` object)
+into a training set and a test set in a ratio of 80% and 20%. This procedure
+is known as hold-out validation. For reproducibility, set the random seed in
+the `set.seed()` function.
+
+```{r}
+set.seed(123)
+
+n = round(0.8 * nrow(points))
+trainIndex = sample(nrow(points), size = n)
+train = points[trainIndex, ]
+test = points[-trainIndex, ]
+```
+
+Next, to simplify the analysis, we will select only one date from our data
+cube, i.e., May 30.
+
+```{r}
+scene = cube
+idx = which(cube$file_info[[1]]$date == "2023-05-30")
+idx = idx[1:4] # remove duplicate scene
+scene$file_info[[1]] = cube$file_info[[1]][idx, ]
+```
+
+As before, let's extract the spectral values for these two datasets (this may
+take a while).
+
+```{r}
+train = sits_get_data(scene, train, label_attr = "category")
+test = sits_get_data(scene, test, label_attr = "category")
+```
+
+In this way, we prepared datasets for modeling.
+
+## Modeling
+
+The **sits** package supports several different machine learning models,
+such as *random forest* (`sits_rfor()`), *support vector machines* (`sits_svm()`)
+or *gradient boosting* (`sits_xgboost()`), as well as neural network models
+(e.g., `sits_mlp()`). To train models, we need the `sits_train()` function,
+in which we must define the training data and the model. In our example,
+we will use random forest with default hyperparameters without tuning. 
+
+```{r}
+rf_model = sits_train(
+  samples = train,
+  ml_method = sits_rfor()
+)
+```
+
+## Validation
+
+After training the model, the most important thing we have to do is to verify
+its correctness. This is an essential step in modeling that cannot be overlooked.
+We need to make a prediction using the trained model (`rf_model` object) on
+the test set (`test` object). The `sits_classify()` function is provided for
+prediction and will return the predicted labels by the model for each point
+based on the already extracted spectral values.
+
+```{r}
+test_pred = sits_classify(test, ml_model = rf_model, progress = FALSE)
+```
+
+As we know the actual land cover classes and those predicted by the model,
+we can use the `sits_accuracy()` function to calculate the accuracy metric,
+Kappa coefficient, and confusion (error) matrix. However, this requires the
+`caret` package to be installed beforehand.
+
+```{r}
+# install.packages("caret")
+acc = sits_accuracy(test_pred)
+acc[["overall"]][["Accuracy"]]
+acc[["overall"]][["Kappa"]]
+```
+
+The accuracy value is approximately 0.8. However, it should be noted that
+this value is overestimated because our dataset was not balanced. In this case,
+the Kappa coefficient is more reliable. Let's also examine the confusion matrix.
+
+```{r}
+acc[["table"]]
+```
+
+## Prediction
+
+If our model is right, the next step is to make predictions for the entire area.
+Since the Sentinel-2 scene is very large and processing will take a long time,
+let's limit the analysis area to a smaller extent. As one option, we can define
+the extent as four coordinates (`xmin`, `xmax`, `ymin`, `ymax`) in the
+corresponding coordinate reference system.
+
+```{r}
+roi = c("xmin" = 688000, "xmax" = 695000, "ymin" = 5826000, "ymax" = 5830000)
+```
+
+::: {.callout-note appearance="simple"}
+Alternatively, it is also possible to use the `sf` object (polygon).
+:::
+
+We can download data from the server to the disk using the `sits_cube_copy()`
+function. It allows setting the output spatial extent (`roi` argument), so
+the images will be cropped to the specified area. We will save the data in a
+temporary folder by specifying the `tempdir()` function in the `output_dir`
+argument. Of course, we can also provide a different directory.
+
+```{r}
+scene = sits_cube_copy(
+  scene,
+  roi = roi,
+  output_dir = tempdir(),
+  progress = FALSE
+)
+```
+
+We have saved the cropped rasters locally in a temporary folder. Now we proceed
+to the actual prediction stage, which consists of two steps:
+
+1. Data cube classification and obtaining class probabilities for each raster
+cell.
+2. Creating a classification map based on the highest probability values.
+
+For the first step, we will need the `sits_classify()` function that we used
+before. However, this time, we will use scenes (images) as input data instead
+of points.
+
+```{r}
+probs_cube = sits_classify(
+  data = scene,
+  ml_model = rf_model,
+  output_dir = tempdir(),
+  progress = FALSE
+)
+```
+
+The second step requires engaging the `sits_label_classification()` function
+on the data cube with the calculated class probabilities. In this case, we will
+create a new folder called `results` where we will save the classification
+result.
+
+```{r}
+dir.create("results")
+```
+
+```{r}
+classification = sits_label_classification(
+  probs_cube,
+  output_dir = "results",
+  progress = FALSE
+)
+```
+
+## Visualization
+
+Finally, let's see what the classification results look like on the map!
+To load the raster, we will use the **terra** package and the `rast()` function.
+An important step is to assign appropriate labels (land classes) to the raster
+cells.
+
+```{r}
+#| message: false
+
+library("terra")
+
+filepath = classification$file_info[[1]]$path
+raster = rast(filepath)
+```
+
+The IDs and corresponding classes are stored in the `classification$labels`
+vector. We need to convert it to a data frame and then assign it to `raster`
+using the `levels()` function.
+
+```{r}
+df = data.frame(id = as.numeric(names(classification$labels[[1]])),
+                category = classification$labels[[1]])
+levels(raster) = df
+```
+
+With the labels prepared, we can create a map by pre-defining the appropriate
+colors.
+
+```{r}
+colors = c("#d20000", "#fdd327", "#d9d9d9", "#29a329", "#1445f9")
+plot(raster, col = colors, main = "Classified image", mar = c(1, 1, 1, 5.5))
+```
+
+::: {.callout-note appearance="simple"}
+In pixel-based classification, the salt-and-pepper effect is a common issue
+(as seen in the image above). To counteract this, functions such as
+`sits_smooth()` in pre-processing or `terra::focal(fun = "modal")` and
+`terra::sieve()` in post-processing can be used.
+:::
+
+# Summary
+
+In this tutorial, we covered the basics of satellite data analysis in **sits**
+package. It provides a comprehensive framework for land use and land
+cover classification using satellite image time series data including data cube
+management, data processing, model training, and visualization. The package is
+actively developed, so check the [GitHub repository](https://github.com/e-sensing/sits)
+for the latest features and updates. Definitely check out the [book](https://e-sensing.github.io/sitsbook/)
+as well!
+
+# Task
+
+Train another machine learning model based on the `points.gpkg` data. Compare
+its accuracy with the trained random forest model. Then, using the better model,
+make predictions for two selected dates (e.g., 2016 and 2024). Have there been
+any notable changes in land cover?
