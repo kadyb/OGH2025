@@ -43,6 +43,7 @@ Your computer should have a minimum of 8 GB of RAM and an Internet connection.
 You can download interactive notebooks (.qmd) and static documents (.html) from this repository:
 
 1. [Automatic acquisition and processing of satellite data in R](https://kadyb.github.io/OGH2025/01_rstac_terra.html)
+2. [Land use and land cover classification with satellite image time series in R](https://kadyb.github.io/OGH2025/02_sits.html)
 
 # Contact
 
