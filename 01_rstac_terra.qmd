@@ -116,7 +116,11 @@ parameters such as:
 - time interval in [RFC 3339 standard](https://www.rfc-editor.org/rfc/rfc3339) (`datetime`),
 - maximum number of products (`limit`).
 
-In this case, we must send the request using the POST method.
+The spatial extent is defined by four geographic coordinates given in the
+appropriate order. Longitude is represented on the X-axis, while latitude is
+represented on the Y-axis.
+
+In this case, we must send the request to the server using the POST method.
 
 ```{r}
 stac_source |>
@@ -184,12 +188,14 @@ stac_source |>
 df = items_as_sf(scenes)
 df$`eo:cloud_cover`
 ```
+
 Satellite scenes usually contain low-resolution thumbnails in RGB composition.
 In the case of Sentinel 2 data, they are saved as `thumbnail.jpg`. For a quick
 preview, we must first select the appropriate layer using the `assets_select()`
 function, and then return the link using the `assets_url()` function. To load
 the `.jpg` file, an additional package is required, e.g., **imager**, which
-has the `load.image()` function.
+has the `load.image()` function. Note that this package requires the
+`libx11-dev` system library on Unix-like systems.
 
 ```{r}
 #| message: false
